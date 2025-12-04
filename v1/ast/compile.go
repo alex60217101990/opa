@@ -673,6 +673,9 @@ func (c *Compiler) GetRulesWithPrefix(ref Ref) (rules []*Rule) {
 }
 
 func extractRules(s []any) []*Rule {
+	if len(s) == 0 {
+		return nil
+	}
 	rules := make([]*Rule, len(s))
 	for i := range s {
 		rules[i] = s[i].(*Rule)
@@ -697,21 +700,24 @@ func extractRules(s []any) []*Rule {
 //	GetRules("data.a.b.c")		=> [rule1, rule2]
 //	GetRules("data.a.b.d")		=> nil
 func (c *Compiler) GetRules(ref Ref) (rules []*Rule) {
-
-	set := map[*Rule]struct{}{}
+	set := ruleSetMapPool.Get()
+	defer ruleSetMapPool.Put(set)
 
 	for _, rule := range c.GetRulesForVirtualDocument(ref) {
-		set[rule] = struct{}{}
+		(*set)[rule] = struct{}{}
 	}
 
 	for _, rule := range c.GetRulesWithPrefix(ref) {
-		set[rule] = struct{}{}
+		(*set)[rule] = struct{}{}
 	}
 
-	for rule := range set {
+	if len(*set) == 0 {
+		return nil
+	}
+	rules = make([]*Rule, 0, len(*set))
+	for rule := range *set {
 		rules = append(rules, rule)
 	}
-
 	return rules
 }
 
@@ -989,11 +995,13 @@ var futureKeywordsPrefix = Ref{FutureRootDocument, InternedTerm("keywords")}
 // checker.
 func (c *Compiler) buildRequiredCapabilities() {
 
-	features := map[string]struct{}{}
+	features := stringStructMapPool.Get()
+	defer stringStructMapPool.Put(features)
 
 	// extract required keywords from modules
 
-	keywords := map[string]struct{}{}
+	keywords := stringStructMapPool.Get()
+	defer stringStructMapPool.Put(keywords)
 
 	for _, name := range c.sorted {
 		for _, imp := range c.imports[name] {
@@ -1001,17 +1009,17 @@ func (c *Compiler) buildRequiredCapabilities() {
 			switch {
 			case path.Equal(RegoV1CompatibleRef):
 				if !c.moduleIsRegoV1(c.Modules[name]) {
-					features[FeatureRegoV1Import] = struct{}{}
+					(*features)[FeatureRegoV1Import] = struct{}{}
 				}
 			case path.HasPrefix(futureKeywordsPrefix):
 				if len(path) == 2 {
 					if c.moduleIsRegoV1(c.Modules[name]) {
 						for kw := range futureKeywords {
-							keywords[kw] = struct{}{}
+							(*keywords)[kw] = struct{}{}
 						}
 					} else {
 						for kw := range allFutureKeywords {
-							keywords[kw] = struct{}{}
+							(*keywords)[kw] = struct{}{}
 						}
 					}
 				} else {
@@ -1019,14 +1027,14 @@ func (c *Compiler) buildRequiredCapabilities() {
 					if c.moduleIsRegoV1(c.Modules[name]) {
 						for allowedKw := range futureKeywords {
 							if kw == allowedKw {
-								keywords[kw] = struct{}{}
+								(*keywords)[kw] = struct{}{}
 								break
 							}
 						}
 					} else {
 						for allowedKw := range allFutureKeywords {
 							if kw == allowedKw {
-								keywords[kw] = struct{}{}
+								(*keywords)[kw] = struct{}{}
 								break
 							}
 						}
@@ -1036,7 +1044,7 @@ func (c *Compiler) buildRequiredCapabilities() {
 		}
 	}
 
-	c.Required.FutureKeywords = util.KeysSorted(keywords)
+	c.Required.FutureKeywords = util.KeysSorted(*keywords)
 
 	// extract required features from modules
 
@@ -1044,22 +1052,22 @@ func (c *Compiler) buildRequiredCapabilities() {
 		mod := c.Modules[name]
 
 		if c.moduleIsRegoV1(mod) {
-			features[FeatureRegoV1] = struct{}{}
+			(*features)[FeatureRegoV1] = struct{}{}
 		} else {
 			for _, rule := range mod.Rules {
 				refLen := len(rule.Head.Reference)
 				if refLen >= 3 {
 					if refLen > len(rule.Head.Reference.ConstantPrefix()) {
-						features[FeatureRefHeads] = struct{}{}
+						(*features)[FeatureRefHeads] = struct{}{}
 					} else {
-						features[FeatureRefHeadStringPrefixes] = struct{}{}
+						(*features)[FeatureRefHeadStringPrefixes] = struct{}{}
 					}
 				}
 			}
 		}
 	}
 
-	c.Required.Features = util.KeysSorted(features)
+	c.Required.Features = util.KeysSorted(*features)
 
 	for i, bi := range c.Required.Builtins {
 		c.Required.Builtins[i] = bi.Minimal()
@@ -1086,11 +1094,18 @@ func (c *Compiler) checkRecursion() {
 func (c *Compiler) checkSelfPath(loc *Location, eq func(a, b util.T) bool, a, b util.T) {
 	tr := NewGraphTraversal(c.Graph)
 	if p := util.DFSPath(tr, eq, a, b); len(p) > 0 {
-		n := make([]string, 0, len(p))
-		for _, x := range p {
-			n = append(n, astNodeToString(x))
+		sb := sbPool.Get()
+		defer sbPool.Put(sb)
+
+		for i, x := range p {
+			if i > 0 {
+				sb.WriteString(" -> ")
+			}
+			sb.WriteString(astNodeToString(x))
 		}
-		if !c.err(NewError(RecursionErr, loc, "rule %v is recursive: %v", astNodeToString(a), strings.Join(n, " -> "))) {
+
+		path := sb.String()
+		if !c.err(NewError(RecursionErr, loc, "rule %v is recursive: %v", astNodeToString(a), path)) {
 			return
 		}
 	}
@@ -1182,18 +1197,20 @@ func (c *Compiler) checkRuleConflicts() {
 
 		case len(defaultRules) > 1:
 
-			defaultRuleLocations := strings.Builder{}
+			defaultRuleLocations := sbPool.Get()
 			defaultRuleLocations.WriteString(defaultRules[0].Loc().String())
 			for i := 1; i < len(defaultRules); i++ {
 				defaultRuleLocations.WriteString(", ")
 				defaultRuleLocations.WriteString(defaultRules[i].Loc().String())
 			}
 
+			locs := defaultRuleLocations.String()
+			sbPool.Put(defaultRuleLocations)
 			return !c.err(NewError(
 				TypeErr,
 				defaultRules[0].Module.Package.Loc(),
 				"multiple default rules %s found at %s",
-				name, defaultRuleLocations.String()),
+				name, locs),
 			)
 		}
 
@@ -3278,7 +3295,13 @@ func (ci *ComprehensionIndex) String() string {
 	if ci == nil {
 		return ""
 	}
-	return fmt.Sprintf("<keys: %v>", NewArray(ci.Keys...))
+	sb := sbPool.Get()
+	defer sbPool.Put(sb)
+
+	sb.WriteString("<keys: ")
+	sb.WriteString(NewArray(ci.Keys...).String())
+	sb.WriteByte('>')
+	return sb.String()
 }
 
 func buildComprehensionIndices(dbg debug.Debug, arity func(Ref) int, candidates VarSet, rwVars map[Var]Var, node Body, result map[*Term]*ComprehensionIndex) uint64 {
@@ -3514,13 +3537,30 @@ type ModuleTreeNode struct {
 }
 
 func (n *ModuleTreeNode) String() string {
-	var rules []string
+	sb := sbPool.Get()
+	defer sbPool.Put(sb)
+
+	sb.WriteString("<ModuleTreeNode key:")
+	fmt.Fprint(sb, n.Key)
+	sb.WriteString(" children:")
+	fmt.Fprint(sb, n.Children)
+	sb.WriteString(" rules:[")
+
+	first := true
 	for _, m := range n.Modules {
 		for _, r := range m.Rules {
-			rules = append(rules, r.Head.String())
+			if !first {
+				sb.WriteByte(' ')
+			}
+			first = false
+			sb.WriteString(r.Head.String())
 		}
 	}
-	return fmt.Sprintf("<ModuleTreeNode key:%v children:%v rules:%v hide:%v>", n.Key, n.Children, rules, n.Hide)
+
+	sb.WriteString("] hide:")
+	fmt.Fprint(sb, n.Hide)
+	sb.WriteByte('>')
+	return sb.String()
 }
 
 // NewModuleTree returns a new ModuleTreeNode that represents the root
@@ -3613,7 +3653,19 @@ type TreeNode struct {
 }
 
 func (n *TreeNode) String() string {
-	return fmt.Sprintf("<TreeNode key:%v values:%v sorted:%v hide:%v>", n.Key, n.Values, n.Sorted, n.Hide)
+	sb := sbPool.Get()
+	defer sbPool.Put(sb)
+
+	sb.WriteString("<TreeNode key:")
+	fmt.Fprint(sb, n.Key)
+	sb.WriteString(" values:")
+	fmt.Fprint(sb, n.Values)
+	sb.WriteString(" sorted:")
+	fmt.Fprint(sb, n.Sorted)
+	sb.WriteString(" hide:")
+	fmt.Fprint(sb, n.Hide)
+	sb.WriteByte('>')
+	return sb.String()
 }
 
 // NewRuleTree returns a new TreeNode that represents the root
