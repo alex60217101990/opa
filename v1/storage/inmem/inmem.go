@@ -20,7 +20,6 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
-	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -158,7 +157,13 @@ func (db *store) Truncate(ctx context.Context, txn storage.Transaction, params s
 		}
 
 		if update.IsPolicy {
-			err = underlying.UpsertPolicy(strings.TrimLeft(update.Path.String(), "/"), update.Value)
+			// Optimized: Avoid intermediate string allocation
+			// Path.String() returns "/path/to/policy", we need "path/to/policy"
+			pathStr := update.Path.String()
+			if len(pathStr) > 0 && pathStr[0] == '/' {
+				pathStr = pathStr[1:] // Slice instead of TrimLeft - zero allocations
+			}
+			err = underlying.UpsertPolicy(pathStr, update.Value)
 			if err != nil {
 				return err
 			}
@@ -168,10 +173,10 @@ func (db *store) Truncate(ctx context.Context, txn storage.Transaction, params s
 				return err
 			}
 
+			// Optimized: Path is already []string, avoid String() + TrimLeft + Split allocations
 			var key []string
-			dirpath := strings.TrimLeft(update.Path.String(), "/")
-			if len(dirpath) > 0 {
-				key = strings.Split(dirpath, "/")
+			if len(update.Path) > 0 {
+				key = []string(update.Path)
 			}
 
 			if value != nil {

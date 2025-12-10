@@ -64,28 +64,46 @@ func MakeDir(ctx context.Context, store Store, txn Transaction, path Path) error
 		return nil
 	}
 
-	node, err := store.Read(ctx, txn, path)
-	if err != nil {
+	// Optimized iterative approach to avoid recursion overhead
+	// Find the first missing parent by walking up the path
+	var missingFrom int = -1
+	for i := len(path); i > 0; i-- {
+		checkPath := path[:i]
+		node, err := store.Read(ctx, txn, checkPath)
+
+		if err == nil {
+			// Node exists, check if it's compatible
+			switch node.(type) {
+			case map[string]any, ast.Object:
+				// Compatible, can continue
+				missingFrom = i
+			default:
+				// Incompatible type
+				return writeConflictError(checkPath)
+			}
+			break
+		}
+
 		if !IsNotFound(err) {
 			return err
 		}
+		// Not found, continue searching upwards
+	}
 
-		if err := MakeDir(ctx, store, txn, path[:len(path)-1]); err != nil {
+	// If missingFrom is still -1, we need to create from root
+	if missingFrom == -1 {
+		missingFrom = 0
+	}
+
+	// Create all missing directories iteratively (avoids recursion)
+	for i := missingFrom + 1; i <= len(path); i++ {
+		currentPath := path[:i]
+		if err := store.Write(ctx, txn, AddOp, currentPath, map[string]any{}); err != nil {
 			return err
 		}
-
-		return store.Write(ctx, txn, AddOp, path, map[string]any{})
 	}
 
-	if _, ok := node.(map[string]any); ok {
-		return nil
-	}
-
-	if _, ok := node.(ast.Object); ok {
-		return nil
-	}
-
-	return writeConflictError(path)
+	return nil
 }
 
 // Txn is a convenience function that executes f inside a new transaction

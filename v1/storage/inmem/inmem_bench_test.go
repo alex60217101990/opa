@@ -59,7 +59,10 @@ func BenchmarkNewTransaction(b *testing.B) {
 	for name, params := range map[string][]storage.TransactionParams{"read": paramsRead, "write": paramsWrite} {
 		b.Run(name, func(b *testing.B) {
 			for b.Loop() {
-				txn, _ := store.NewTransaction(b.Context(), params...)
+				txn, err := store.NewTransaction(b.Context(), params...)
+				if err != nil {
+					b.Fatal(err)
+				}
 				store.Abort(b.Context(), txn)
 			}
 		})
@@ -197,7 +200,10 @@ func BenchmarkWriteAndCommit(b *testing.B) {
 	}
 
 	operation := func(ctx context.Context, target *target) error {
-		txn, _ := target.store.NewTransaction(b.Context(), storage.WriteParams)
+		txn, err := target.store.NewTransaction(b.Context(), storage.WriteParams)
+		if err != nil {
+			return err
+		}
 		for i := range 100 {
 			val := paths[i][0]
 			if err := target.store.Write(b.Context(), txn, storage.AddOp, paths[i], val); err != nil {
@@ -220,7 +226,10 @@ func BenchmarkWriteAndCommitWithTriggers(b *testing.B) {
 	}
 
 	operation := func(ctx context.Context, target *target) error {
-		txn, _ := target.store.NewTransaction(b.Context(), storage.WriteParams)
+		txn, err := target.store.NewTransaction(b.Context(), storage.WriteParams)
+		if err != nil {
+			return err
+		}
 		for i := range 100 {
 			if err := target.store.Write(b.Context(), txn, storage.AddOp, paths[i], paths[i][0]); err != nil {
 				return err
@@ -251,7 +260,10 @@ func BenchmarkWriteAndCommitWithTriggersSkipConversion(b *testing.B) {
 	}
 
 	operation := func(ctx context.Context, target *target) error {
-		txn, _ := target.store.NewTransaction(b.Context(), storage.WriteParams)
+		txn, err := target.store.NewTransaction(b.Context(), storage.WriteParams)
+		if err != nil {
+			return err
+		}
 		for i := range 100 {
 			if err := target.store.Write(b.Context(), txn, storage.AddOp, paths[i], values[i]); err != nil {
 				return err
@@ -364,7 +376,8 @@ func (t *target) VerifyRead(b *testing.B, path storage.Path, expected any) {
 		} else {
 			if t.isRoundTripping {
 				cpy := expected
-				if must(b, util.RoundTrip(&cpy)); !reflect.DeepEqual(act, cpy) {
+				must(b, util.RoundTrip(&cpy))
+				if !reflect.DeepEqual(act, cpy) {
 					b.Fatalf("store: %s: expected: %v, got: %v", t.name, cpy, act)
 				}
 			} else if !reflect.DeepEqual(act, expected) {
@@ -386,4 +399,125 @@ func must(b *testing.B, err error) {
 	if err != nil {
 		b.Fatal(err)
 	}
+}
+
+// BenchmarkPathOperations tests the performance of path parsing and string conversion
+func BenchmarkPathOperations(b *testing.B) {
+	paths := []string{
+		"/data",
+		"/data/users/0",
+		"/data/users/0/profile",
+		"/hello%20world/foo%2Fbar",
+	}
+
+	b.Run("ParsePath", func(b *testing.B) {
+		for _, p := range paths {
+			b.Run(p, func(b *testing.B) {
+				b.ReportAllocs()
+				for b.Loop() {
+					if _, ok := storage.ParsePath(p); !ok {
+						b.Fatalf("failed to parse path: %s", p)
+					}
+				}
+			})
+		}
+	})
+
+	b.Run("ParsePathEscaped", func(b *testing.B) {
+		for _, p := range paths {
+			b.Run(p, func(b *testing.B) {
+				b.ReportAllocs()
+				for b.Loop() {
+					if _, ok := storage.ParsePathEscaped(p); !ok {
+						b.Fatalf("failed to parse escaped path: %s", p)
+					}
+				}
+			})
+		}
+	})
+
+	b.Run("PathString", func(b *testing.B) {
+		parsed := make([]storage.Path, len(paths))
+		for i, p := range paths {
+			var ok bool
+			parsed[i], ok = storage.ParsePath(p)
+			if !ok {
+				b.Fatalf("failed to parse path: %s", p)
+			}
+		}
+
+		for i, p := range parsed {
+			b.Run(paths[i], func(b *testing.B) {
+				b.ReportAllocs()
+				for j := 0; j < b.N; j++ {
+					_ = p.String()
+				}
+			})
+		}
+	})
+
+	b.Run("PathEqual", func(b *testing.B) {
+		p1, ok1 := storage.ParsePath("/data/users/0")
+		if !ok1 {
+			b.Fatal("failed to parse path: /data/users/0")
+		}
+		p2, ok2 := storage.ParsePath("/data/users/0")
+		if !ok2 {
+			b.Fatal("failed to parse path: /data/users/0")
+		}
+
+		b.ReportAllocs()
+		for b.Loop() {
+			_ = p1.Equal(p2)
+		}
+	})
+}
+
+// BenchmarkTransactionUpdates tests transaction update list performance
+func BenchmarkTransactionUpdates(b *testing.B) {
+	b.Run("MultipleWrites", func(b *testing.B) {
+		store := inmem.NewFromObject(map[string]any{})
+
+		b.ReportAllocs()
+		b.ResetTimer()
+
+		for b.Loop() {
+			txn, err := store.NewTransaction(b.Context(), storage.WriteParams)
+			if err != nil {
+				b.Fatal(err)
+			}
+			for j := range 10 {
+				path := storage.Path{strconv.Itoa(j)}
+				if err := store.Write(b.Context(), txn, storage.AddOp, path, j); err != nil {
+					b.Fatal(err)
+				}
+			}
+			if err := store.Commit(b.Context(), txn); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+
+	b.Run("OverlappingWrites", func(b *testing.B) {
+		store := inmem.NewFromObject(map[string]any{"foo": 0})
+
+		b.ReportAllocs()
+		b.ResetTimer()
+
+		for b.Loop() {
+			txn, err := store.NewTransaction(b.Context(), storage.WriteParams)
+			if err != nil {
+				b.Fatal(err)
+			}
+			// Write to same path multiple times
+			for j := range 10 {
+				if err := store.Write(b.Context(), txn, storage.ReplaceOp, path, j); err != nil {
+					b.Fatal(err)
+				}
+			}
+			if err := store.Commit(b.Context(), txn); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
 }

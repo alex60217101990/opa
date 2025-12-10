@@ -5,7 +5,6 @@
 package inmem
 
 import (
-	"container/list"
 	"encoding/json"
 	"slices"
 	"strconv"
@@ -36,7 +35,7 @@ import (
 // to the underlying store. Read transactions do not support upgrade.
 type transaction struct {
 	db       *store
-	updates  *list.List
+	updates  []dataUpdate
 	context  *storage.Context
 	policies map[string]policyUpdate
 	xid      uint64
@@ -58,16 +57,13 @@ func (txn *transaction) Write(op storage.PatchOp, path storage.Path, value any) 
 		return &storage.Error{Code: storage.InvalidTransactionErr, Message: "data write during read transaction"}
 	}
 
-	if txn.updates == nil {
-		txn.updates = list.New()
-	}
-
 	if len(path) == 0 {
 		return txn.updateRoot(op, value)
 	}
 
-	for curr := txn.updates.Front(); curr != nil; {
-		update := curr.Value.(dataUpdate)
+	// Scan existing updates (backwards for recent updates first)
+	for i := len(txn.updates) - 1; i >= 0; i-- {
+		update := txn.updates[i]
 
 		// Check if new update masks existing update exactly. In this case, the
 		// existing update can be removed and no other updates have to be
@@ -89,7 +85,9 @@ func (txn *transaction) Write(op storage.PatchOp, path storage.Path, value any) 
 				return nil
 			}
 
-			txn.updates.Remove(curr)
+			// Remove by swapping with last element
+			txn.updates[i] = txn.updates[len(txn.updates)-1]
+			txn.updates = txn.updates[:len(txn.updates)-1]
 			break
 		}
 
@@ -97,9 +95,9 @@ func (txn *transaction) Write(op storage.PatchOp, path storage.Path, value any) 
 		// existing update has to be removed but other updates may overlap, so
 		// we must continue.
 		if update.Path().HasPrefix(path) {
-			remove := curr
-			curr = curr.Next()
-			txn.updates.Remove(remove)
+			// Remove by swapping
+			txn.updates[i] = txn.updates[len(txn.updates)-1]
+			txn.updates = txn.updates[:len(txn.updates)-1]
 			continue
 		}
 
@@ -117,8 +115,6 @@ func (txn *transaction) Write(op storage.PatchOp, path storage.Path, value any) 
 			update.Set(newUpdate.Apply(update.Value()))
 			return nil
 		}
-
-		curr = curr.Next()
 	}
 
 	update, err := txn.db.newUpdate(txn.db.data, op, path, 0, value)
@@ -126,7 +122,7 @@ func (txn *transaction) Write(op storage.PatchOp, path storage.Path, value any) 
 		return err
 	}
 
-	txn.updates.PushFront(update)
+	txn.updates = append(txn.updates, update)
 	return nil
 }
 
@@ -182,8 +178,9 @@ func (txn *transaction) updateRoot(op storage.PatchOp, value any) error {
 		}
 	}
 
-	txn.updates.Init()
-	txn.updates.PushFront(update)
+	// Clear and set new root update
+	txn.updates = txn.updates[:0] // Reuse backing array
+	txn.updates = append(txn.updates, update.(dataUpdate))
 
 	return nil
 }
@@ -191,13 +188,14 @@ func (txn *transaction) updateRoot(op storage.PatchOp, value any) error {
 func (txn *transaction) Commit() (result storage.TriggerEvent) {
 	result.Context = txn.context
 
-	if txn.updates != nil {
+	if len(txn.updates) > 0 {
 		if len(txn.db.triggers) > 0 {
-			result.Data = slices.Grow(result.Data, txn.updates.Len())
+			result.Data = slices.Grow(result.Data, len(txn.updates))
 		}
 
-		for curr := txn.updates.Front(); curr != nil; curr = curr.Next() {
-			action := curr.Value.(dataUpdate)
+		// Apply updates in order
+		for i := range txn.updates {
+			action := txn.updates[i]
 			txn.db.data = action.Apply(txn.db.data)
 
 			if len(txn.db.triggers) > 0 {
@@ -256,15 +254,15 @@ func deepcpy(v any) any {
 }
 
 func (txn *transaction) Read(path storage.Path) (any, error) {
-	if !txn.write || txn.updates == nil {
+	if !txn.write || len(txn.updates) == 0 {
 		return pointer(txn.db.data, path)
 	}
 
 	var merge []dataUpdate
 
-	for curr := txn.updates.Front(); curr != nil; curr = curr.Next() {
-
-		upd := curr.Value.(dataUpdate)
+	// Scan updates
+	for i := range txn.updates {
+		upd := txn.updates[i]
 
 		if path.HasPrefix(upd.Path()) {
 			if upd.Remove() {
@@ -298,16 +296,34 @@ func (txn *transaction) Read(path storage.Path) (any, error) {
 }
 
 func (txn *transaction) ListPolicies() (ids []string) {
+	// Pre-allocate slice with estimated capacity to reduce allocations
+	estimatedSize := len(txn.db.policies)
+	if txn.policies != nil {
+		estimatedSize += len(txn.policies)
+	}
+
+	if estimatedSize > 0 {
+		ids = make([]string, 0, estimatedSize)
+	}
+
+	// Add existing policies that aren't being removed
 	for id := range txn.db.policies {
-		if _, ok := txn.policies[id]; !ok {
+		if txn.policies == nil {
+			ids = append(ids, id)
+		} else if _, ok := txn.policies[id]; !ok {
 			ids = append(ids, id)
 		}
 	}
-	for id, update := range txn.policies {
-		if !update.remove {
-			ids = append(ids, id)
+
+	// Add new/updated policies from transaction
+	if txn.policies != nil {
+		for id, update := range txn.policies {
+			if !update.remove {
+				ids = append(ids, id)
+			}
 		}
 	}
+
 	return ids
 }
 
@@ -422,13 +438,18 @@ func newUpdateRaw(data any, op storage.PatchOp, path storage.Path, idx int, valu
 
 func newUpdateArray(data []any, op storage.PatchOp, path storage.Path, idx int, value any) (dataUpdate, error) {
 	if idx == len(path)-1 {
-		if path[idx] == "-" || path[idx] == strconv.Itoa(len(data)) {
+		// Optimized: cache strconv.Itoa result to avoid repeated conversions
+		segment := path[idx]
+		dataLen := len(data)
+		dataLenStr := strconv.Itoa(dataLen)
+
+		if segment == "-" || segment == dataLenStr {
 			if op != storage.AddOp {
 				return nil, errors.NewInvalidPatchError("%v: invalid patch path", path)
 			}
-			cpy := make([]any, len(data)+1)
+			cpy := make([]any, dataLen+1)
 			copy(cpy, data)
-			cpy[len(data)] = value
+			cpy[dataLen] = value
 			return &updateRaw{path[:len(path)-1], false, cpy}, nil
 		}
 

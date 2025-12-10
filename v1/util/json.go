@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"io"
 	"reflect"
-	"strconv"
 
 	"sigs.k8s.io/yaml"
 
@@ -86,6 +85,9 @@ func MustMarshalJSON(x any) []byte {
 // Thereby, it is converting its argument to the representation expected by
 // rego.Input and inmem's Write operations. Works with both references and
 // values.
+//
+// This function now uses pooled buffers to reduce allocations.
+// For hot paths, consider using RoundTripWithPool directly.
 func RoundTrip(x *any) error {
 	// Avoid round-tripping types that won't change as a result of
 	// marshalling/unmarshalling, as even for those values, round-tripping
@@ -99,47 +101,58 @@ func RoundTrip(x *any) error {
 	a := *x
 	switch v := a.(type) {
 	case int:
-		*x = json.Number(strconv.Itoa(v))
+		*x = intToJSONNumber(v)
 		return nil
 	case int8:
-		*x = json.Number(strconv.FormatInt(int64(v), 10))
+		*x = int8ToJSONNumber(v)
 		return nil
 	case int16:
-		*x = json.Number(strconv.FormatInt(int64(v), 10))
+		*x = int16ToJSONNumber(v)
 		return nil
 	case int32:
-		*x = json.Number(strconv.FormatInt(int64(v), 10))
+		*x = int32ToJSONNumber(v)
 		return nil
 	case int64:
-		*x = json.Number(strconv.FormatInt(v, 10))
+		*x = int64ToJSONNumber(v)
 		return nil
 	case uint:
-		*x = json.Number(strconv.FormatUint(uint64(v), 10))
+		*x = uintToJSONNumber(v)
 		return nil
 	case uint8:
-		*x = json.Number(strconv.FormatUint(uint64(v), 10))
+		*x = uint8ToJSONNumber(v)
 		return nil
 	case uint16:
-		*x = json.Number(strconv.FormatUint(uint64(v), 10))
+		*x = uint16ToJSONNumber(v)
 		return nil
 	case uint32:
-		*x = json.Number(strconv.FormatUint(uint64(v), 10))
+		*x = uint32ToJSONNumber(v)
 		return nil
 	case uint64:
-		*x = json.Number(strconv.FormatUint(v, 10))
+		*x = uint64ToJSONNumber(v)
 		return nil
 	case float32:
-		*x = json.Number(strconv.FormatFloat(float64(v), 'f', -1, 32))
+		*x = float32ToJSONNumber(v)
 		return nil
 	case float64:
-		*x = json.Number(strconv.FormatFloat(v, 'f', -1, 64))
+		*x = float64ToJSONNumber(v)
 		return nil
 	}
 
-	bs, err := json.Marshal(x)
-	if err != nil {
+	// Use pooled buffer for complex types
+	buf := getBuffer()
+	defer putBuffer(buf)
+
+	encoder := json.NewEncoder(buf)
+	if err := encoder.Encode(x); err != nil {
 		return err
 	}
+
+	// Remove trailing newline added by Encoder.Encode
+	bs := buf.Bytes()
+	if len(bs) > 0 && bs[len(bs)-1] == '\n' {
+		bs = bs[:len(bs)-1]
+	}
+
 	return UnmarshalJSON(bs, x)
 }
 
