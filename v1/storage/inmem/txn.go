@@ -312,15 +312,20 @@ func (txn *transaction) Commit() (result storage.TriggerEvent) {
 		txn.pathIndex = nil
 	}
 
+	// Check once if we have triggers - avoid repeated map len checks
+	hasTriggers := len(txn.db.triggers) > 0
+
 	if len(txn.updates) > 0 {
-		if len(txn.db.triggers) > 0 {
+		// Only preallocate event slice if we have triggers
+		if hasTriggers {
 			result.Data = slices.Grow(result.Data, len(txn.updates))
 		}
 
 		for _, action := range txn.updates {
 			txn.db.data = action.Apply(txn.db.data)
 
-			if len(txn.db.triggers) > 0 {
+			// Only build event if triggers exist
+			if hasTriggers {
 				result.Data = append(result.Data, storage.DataEvent{
 					Path:    action.Path(),
 					Data:    action.Value(),
@@ -330,33 +335,37 @@ func (txn *transaction) Commit() (result storage.TriggerEvent) {
 		}
 	}
 
-	if len(txn.policies) > 0 && len(txn.db.triggers) > 0 {
-		result.Policy = slices.Grow(result.Policy, len(txn.policies))
-	}
-
-	for id, upd := range txn.policies {
-		if upd.remove {
-			delete(txn.db.policies, id)
-		} else {
-			txn.db.policies[id] = upd.value
+	if len(txn.policies) > 0 {
+		// Only preallocate if we have triggers
+		if hasTriggers {
+			result.Policy = slices.Grow(result.Policy, len(txn.policies))
 		}
 
-		if len(txn.db.triggers) > 0 {
-			// Decompress policy data for triggers
-			var policyData []byte
-			if !upd.remove && upd.value != nil {
-				var err error
-				policyData, err = upd.value.get()
-				if err != nil {
-					// Should not happen - data was just compressed successfully
-					panic(err)
-				}
+		for id, upd := range txn.policies {
+			if upd.remove {
+				delete(txn.db.policies, id)
+			} else {
+				txn.db.policies[id] = upd.value
 			}
-			result.Policy = append(result.Policy, storage.PolicyEvent{
-				ID:      id,
-				Data:    policyData,
-				Removed: upd.remove,
-			})
+
+			// Only decompress and build policy event if triggers exist
+			if hasTriggers {
+				// Decompress policy data for triggers
+				var policyData []byte
+				if !upd.remove && upd.value != nil {
+					var err error
+					policyData, err = upd.value.get()
+					if err != nil {
+						// Should not happen - data was just compressed successfully
+						panic(err)
+					}
+				}
+				result.Policy = append(result.Policy, storage.PolicyEvent{
+					ID:      id,
+					Data:    policyData,
+					Removed: upd.remove,
+				})
+			}
 		}
 	}
 	return result

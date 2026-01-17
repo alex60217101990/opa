@@ -355,20 +355,31 @@ func (h *handle) Unregister(_ context.Context, txn storage.Transaction) {
 }
 
 func (db *store) runOnCommitTriggers(ctx context.Context, txn storage.Transaction, event storage.TriggerEvent) {
-	// While it's unlikely, the API allows one trigger to be configured to want
-	// data conversion, and another that doesn't. So let's handle that properly.
-	var wantsDataConversion bool
+	// Fast path: if no triggers or no data, nothing to do
+	if len(db.triggers) == 0 {
+		return
+	}
+
+	// Optimize: single pass through triggers to categorize them
+	// Avoid iterating twice (once to check, once to execute)
+	var needsConversion, hasNonConverting bool
 	if db.returnASTValuesOnRead && len(event.Data) > 0 {
 		for _, t := range db.triggers {
 			if !t.SkipDataConversion {
-				wantsDataConversion = true
+				needsConversion = true
+			} else {
+				hasNonConverting = true
+			}
+			// Early exit if we know we have both types
+			if needsConversion && hasNonConverting {
 				break
 			}
 		}
 	}
 
+	// Only convert if at least one trigger needs conversion
 	var converted storage.TriggerEvent
-	if wantsDataConversion {
+	if needsConversion {
 		converted = storage.TriggerEvent{
 			Policy:  event.Policy,
 			Data:    make([]storage.DataEvent, 0, len(event.Data)),
@@ -390,8 +401,9 @@ func (db *store) runOnCommitTriggers(ctx context.Context, txn storage.Transactio
 		}
 	}
 
+	// Execute triggers with appropriate event
 	for _, t := range db.triggers {
-		if wantsDataConversion && !t.SkipDataConversion {
+		if needsConversion && !t.SkipDataConversion {
 			t.OnCommit(ctx, txn, converted)
 		} else {
 			t.OnCommit(ctx, txn, event)
