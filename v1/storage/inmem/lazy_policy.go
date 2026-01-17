@@ -61,18 +61,19 @@ var (
 //
 // Thread-safe: all operations are safe for concurrent access.
 type lazyPolicy struct {
-	// compressed stores the flate-compressed policy bytes.
-	// This is the only heavy data stored (~50% of original).
-	compressed []byte
-
 	// hash stores the SHA256 hash of the ORIGINAL uncompressed data.
 	// Used for fast O(1) policy comparison without decompression.
 	// Computed during compression via io.MultiWriter.
-	hash [32]byte
+	hash [32]byte // 32 bytes - placed first for alignment
+
+	// compressed stores the flate-compressed policy bytes.
+	// This is the only heavy data stored (~50% of original).
+	compressed []byte // 24 bytes (slice header: ptr + len + cap)
 
 	// originalSize stores the uncompressed size for buffer pre-allocation.
 	// This field is immutable after creation.
-	originalSize int
+	originalSize int // 8 bytes (int is 64-bit on 64-bit platforms)
+	// Total: 64 bytes (32 + 24 + 8 = 64, perfectly aligned)
 }
 
 // newLazyPolicy creates a new lazy policy by compressing the provided data.

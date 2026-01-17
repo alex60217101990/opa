@@ -15,9 +15,10 @@ import (
 )
 
 type updateAST struct {
-	path   storage.Path // data path modified by update
-	remove bool         // indicates whether update removes the value at path
-	value  ast.Value    // value to add/replace at path (ignored if remove is true)
+	path   storage.Path // 24 bytes (slice header) - data path modified by update
+	value  ast.Value    // 16 bytes (interface) - value to add/replace at path (ignored if remove is true)
+	remove bool         // 1 byte - indicates whether update removes the value at path
+	// Total: 48 bytes (24 + 16 + 1 + 7 padding = 48)
 }
 
 func (u *updateAST) Path() storage.Path {
@@ -100,7 +101,7 @@ func newUpdateArrayAST(data *ast.Array, op storage.PatchOp, path storage.Path, i
 			}
 
 			cpy := data.Append(ast.NewTerm(value))
-			return &updateAST{path[:len(path)-1], false, cpy}, nil
+			return &updateAST{path[:len(path)-1], cpy, false}, nil
 		}
 
 		pos, err := ptr.ValidateASTArrayIndex(data, path[idx], path)
@@ -118,7 +119,7 @@ func newUpdateArrayAST(data *ast.Array, op storage.PatchOp, path storage.Path, i
 				results = append(results, data.Elem(i))
 			}
 
-			return &updateAST{path[:len(path)-1], false, ast.NewArray(results...)}, nil
+			return &updateAST{path[:len(path)-1], ast.NewArray(results...), false}, nil
 
 		case storage.RemoveOp:
 			var results []*ast.Term
@@ -127,7 +128,7 @@ func newUpdateArrayAST(data *ast.Array, op storage.PatchOp, path storage.Path, i
 					results = append(results, data.Elem(i))
 				}
 			}
-			return &updateAST{path[:len(path)-1], false, ast.NewArray(results...)}, nil
+			return &updateAST{path[:len(path)-1], ast.NewArray(results...), false}, nil
 
 		default:
 			var results []*ast.Term
@@ -139,7 +140,7 @@ func newUpdateArrayAST(data *ast.Array, op storage.PatchOp, path storage.Path, i
 				}
 			}
 
-			return &updateAST{path[:len(path)-1], false, ast.NewArray(results...)}, nil
+			return &updateAST{path[:len(path)-1], ast.NewArray(results...), false}, nil
 		}
 	}
 
@@ -162,7 +163,7 @@ func newUpdateObjectAST(data ast.Object, op storage.PatchOp, path storage.Path, 
 				return nil, errors.NotFoundErr
 			}
 		}
-		return &updateAST{path, op == storage.RemoveOp, value}, nil
+		return &updateAST{path, value, op == storage.RemoveOp}, nil
 	}
 
 	if val != nil {

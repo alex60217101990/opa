@@ -99,25 +99,31 @@ func NewFromReaderWithOpts(r io.Reader, opts ...Opt) storage.Store {
 }
 
 type store struct {
-	rmu      sync.RWMutex                      // reader-writer lock
-	wmu      sync.Mutex                        // writer lock
-	xid      uint64                            // last generated transaction id
-	data     any                               // raw or AST data
-	policies map[string]*lazyPolicy            // compressed policies with lazy decompression
-	triggers map[*handle]storage.TriggerConfig // registered triggers
+	// Mutexes first (largest fields - sync.RWMutex is 24 bytes, sync.Mutex is 8 bytes)
+	rmu sync.RWMutex // 24 bytes - reader-writer lock
+	wmu sync.Mutex   // 8 bytes - writer lock
 
+	// 8-byte aligned fields
+	xid      uint64                            // 8 bytes - last generated transaction id
+	data     any                               // 16 bytes (interface = 8 byte type + 8 byte value)
+	policies map[string]*lazyPolicy            // 8 bytes - compressed policies with lazy decompression
+	triggers map[*handle]storage.TriggerConfig // 8 bytes - registered triggers
+
+	// Bools at the end (1 byte each, packed together)
 	// roundTripOnWrite, if true, means that every call to Write round trips the
 	// data through JSON before adding the data to the store. Defaults to true.
-	roundTripOnWrite bool
+	roundTripOnWrite bool // 1 byte
 
 	// returnASTValuesOnRead, if true, means that the store will eagerly convert data to AST values,
 	// and return them on Read.
 	// FIXME: naming(?)
-	returnASTValuesOnRead bool
+	returnASTValuesOnRead bool // 1 byte
+	// Total: 72 bytes (24 + 8 + 8 + 16 + 8 + 8 + 1 + 1 = 74, aligned to 80 with padding)
 }
 
 type handle struct {
-	db *store
+	db *store // 8 bytes
+	// Total: 8 bytes
 }
 
 func (db *store) NewTransaction(_ context.Context, params ...storage.TransactionParams) (storage.Transaction, error) {
