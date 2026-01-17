@@ -135,7 +135,23 @@ func (txn *transaction) Write(op storage.PatchOp, path storage.Path, value any) 
 
 	// Check for prefix relationships (parent/child masking)
 	// This still requires iteration but only for checking prefixes, not exact matches
-	toRemove := []int{} // collect indices to remove
+
+	// Use pool for toRemove slice only if we have many updates (amortizes pool overhead)
+	// For small transactions, stack allocation is faster
+	const poolThreshold = 32
+	var toRemoveStack [8]int         // stack-allocated for small cases
+	var toRemove []int               // slice for collecting indices
+	var toRemovePtr *[]int           // pool pointer (only used if > threshold)
+
+	if len(txn.updates) > poolThreshold {
+		// Large transaction - use pool to reduce heap allocations
+		toRemovePtr = getIntSlice()
+		toRemove = *toRemovePtr
+		defer putIntSlice(toRemovePtr)
+	} else {
+		// Small transaction - use stack allocation
+		toRemove = toRemoveStack[:0]
+	}
 
 	for i := 0; i < len(txn.updates); i++ {
 		update := txn.updates[i]
@@ -190,13 +206,16 @@ func (txn *transaction) Write(op storage.PatchOp, path storage.Path, value any) 
 
 // initPathIndex initializes the path index by building it from existing updates.
 // Called when transaction grows beyond threshold to enable O(1) lookups.
+// Uses sync.Pool to reduce allocations for large transactions.
 func (txn *transaction) initPathIndex() {
 	if txn.pathIndex != nil {
 		return // Already initialized
 	}
 
-	// Pre-allocate based on current update count
-	txn.pathIndex = make(map[string]int, len(txn.updates))
+	// Get map from pool to reduce allocations (only for large transactions)
+	// For small transactions, pool overhead isn't worth it, but we only call
+	// this function when len(updates) >= threshold, so pool is always beneficial here
+	txn.pathIndex = getPathIndex()
 
 	// Build index from existing updates
 	for i, update := range txn.updates {
@@ -286,6 +305,12 @@ func (txn *transaction) updateRoot(op storage.PatchOp, value any) error {
 
 func (txn *transaction) Commit() (result storage.TriggerEvent) {
 	result.Context = txn.context
+
+	// Return pathIndex map to pool after commit (no longer needed)
+	if txn.pathIndex != nil {
+		defer putPathIndex(txn.pathIndex)
+		txn.pathIndex = nil
+	}
 
 	if len(txn.updates) > 0 {
 		if len(txn.db.triggers) > 0 {
