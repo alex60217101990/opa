@@ -2555,12 +2555,13 @@ func (e evalTree) enumerate(iter unifyIterator) error {
 				}
 			}
 		case ast.Set:
-			if err := doc.Iter(func(elem *ast.Term) error {
+			// Use Slice() to avoid closure allocation in Iter()
+			for _, elem := range doc.Slice() {
 				en.key = elem
 				err := e.e.biunify(elem, e.ref[e.pos], e.bindings, e.bindings, en.call)
-				return dc.handleErr(err)
-			}); err != nil {
-				return err
+				if err := dc.handleErr(err); err != nil {
+					return err
+				}
 			}
 		}
 	}
@@ -2573,11 +2574,12 @@ func (e evalTree) enumerate(iter unifyIterator) error {
 		return nil
 	}
 
+	// Use method value to avoid closure allocation
+	en := enumerateNext{e: e, iter: iter}
 	for _, k := range e.node.Sorted {
 		key := ast.NewTerm(k)
-		if err := e.e.biunify(key, e.ref[e.pos], e.bindings, e.bindings, func() error {
-			return e.next(iter, key)
-		}); err != nil {
+		en.key = key
+		if err := e.e.biunify(key, e.ref[e.pos], e.bindings, e.bindings, en.call); err != nil {
 			return err
 		}
 	}
