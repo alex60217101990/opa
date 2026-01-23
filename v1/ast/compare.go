@@ -326,18 +326,42 @@ func TermValueEqual(a, b *Term) bool {
 	return ValueEqual(a.Value, b.Value)
 }
 
+// ValueEqual returns true if a and b are equal.
+//
+// For simple scalar types (Null, Boolean, String, Number, Var), equality logic
+// is inlined directly in the switch statement to avoid the overhead of a second
+// type assertion in each type's Equal() method. This optimization follows the
+// same approach documented in String.Compare (see term.go:802-804).
 func ValueEqual(a, b Value) bool {
 	switch v := a.(type) {
 	case Null:
-		return v.Equal(b)
+		// Inline Null.Equal to avoid second type switch
+		_, ok := b.(Null)
+		return ok
 	case Boolean:
-		return v.Equal(b)
+		// Inline Boolean.Equal to avoid second type switch
+		if other, ok := b.(Boolean); ok {
+			return v == other
+		}
+		return false
 	case Number:
-		return v.Equal(b)
+		// Inline Number.Equal to avoid second type switch
+		if other, ok := b.(Number); ok {
+			return NumberCompare(v, other) == 0
+		}
+		return false
 	case String:
-		return v.Equal(b)
+		// Inline String.Equal to avoid second type switch
+		if other, ok := b.(String); ok {
+			return v == other
+		}
+		return false
 	case Var:
-		return v.Equal(b)
+		// Inline Var.Equal to avoid second type switch
+		if other, ok := b.(Var); ok {
+			return v == other
+		}
+		return false
 	case Ref:
 		return v.Equal(b)
 	case *Array:
