@@ -96,7 +96,34 @@ func InterfaceToValue(x any) (Value, error) {
 		}
 		return NewArray(r...), nil
 	case map[string]any:
+		// Hybrid approach: use original code for small maps, batch allocation for large
+		// Threshold chosen based on benchmarking to balance performance across sizes
+		const batchThreshold = 16
+
+		if len(x) < batchThreshold {
+			// Small map: use original approach with tuples (faster for small sizes)
+			kvs := util.NewPtrSlice[Term](len(x) * 2)
+			idx := 0
+			for k, v := range x {
+				kvs[idx].Value = String(k)
+				v, err := InterfaceToValue(v)
+				if err != nil {
+					return nil, err
+				}
+				kvs[idx+1].Value = v
+				idx += 2
+			}
+			tuples := make([][2]*Term, len(kvs)/2)
+			for i := 0; i < len(kvs); i += 2 {
+				tuples[i/2] = *(*[2]*Term)(kvs[i : i+2])
+			}
+			return NewObject(tuples...), nil
+		}
+
+		// Large map: use batch allocation for objectElems (better for large sizes)
 		kvs := util.NewPtrSlice[Term](len(x) * 2)
+		elems := make([]objectElem, len(x))
+		r := newobject(len(x))
 		idx := 0
 		for k, v := range x {
 			kvs[idx].Value = String(k)
@@ -105,17 +132,47 @@ func InterfaceToValue(x any) (Value, error) {
 				return nil, err
 			}
 			kvs[idx+1].Value = v
+			r.insertWithElem(&elems[idx/2], kvs[idx], kvs[idx+1], false)
 			idx += 2
 		}
-		tuples := make([][2]*Term, len(kvs)/2)
-		for i := 0; i < len(kvs); i += 2 {
-			tuples[i/2] = *(*[2]*Term)(kvs[i : i+2])
-		}
-		return NewObject(tuples...), nil
+		return r, nil
 	case map[string]string:
+		// Batch allocate Terms and objectElems for typed map
+		kvs := util.NewPtrSlice[Term](len(x) * 2)
+		elems := make([]objectElem, len(x))
 		r := newobject(len(x))
+		idx := 0
 		for k, v := range x {
-			r.Insert(StringTerm(k), StringTerm(v))
+			kvs[idx].Value = String(k)
+			kvs[idx+1].Value = String(v)
+			r.insertWithElem(&elems[idx/2], kvs[idx], kvs[idx+1], false)
+			idx += 2
+		}
+		return r, nil
+	case map[string]int:
+		// Batch allocate Terms and objectElems for typed map
+		kvs := util.NewPtrSlice[Term](len(x) * 2)
+		elems := make([]objectElem, len(x))
+		r := newobject(len(x))
+		idx := 0
+		for k, v := range x {
+			kvs[idx].Value = String(k)
+			kvs[idx+1].Value = newIntNumberValue(v)
+			r.insertWithElem(&elems[idx/2], kvs[idx], kvs[idx+1], false)
+			idx += 2
+		}
+		return r, nil
+	case map[string]bool:
+		// Batch allocate Terms and objectElems for typed map
+		kvs := util.NewPtrSlice[Term](len(x) * 2)
+		elems := make([]objectElem, len(x))
+		r := newobject(len(x))
+		idx := 0
+		for k, v := range x {
+			kvs[idx].Value = String(k)
+			kvs[idx+1].Value = internedBooleanValue(v)
+			r.insertWithElem(&elems[idx/2], kvs[idx], kvs[idx+1], false)
+			idx += 2
 		}
 		return r, nil
 	default:
@@ -2571,6 +2628,57 @@ func (obj *object) insert(k, v *Term, resetSortGuard bool) {
 		// Note that this will always be the case when external code calls insert via
 		// Add, or otherwise. Internal code may however benefit from not having to
 		// re-create this when it's known not to be needed.
+		obj.sortGuard = sync.Once{}
+	}
+
+	obj.hash += hash + v.Hash()
+
+	if k.IsGround() {
+		obj.ground++
+	}
+	if v.IsGround() {
+		obj.ground++
+	}
+}
+
+// insertWithElem is like insert but uses a pre-allocated objectElem.
+// This is an optimization for batch insertions where all elems can be allocated at once.
+// NOTE: elem must not be nil and must not be shared with other objects.
+func (obj *object) insertWithElem(elem *objectElem, k, v *Term, resetSortGuard bool) {
+	hash := k.Hash()
+	head := obj.elems[hash]
+
+	for curr := head; curr != nil; curr = curr.next {
+		if KeyHashEqual(curr.key.Value, k.Value) {
+			if curr.value.IsGround() {
+				obj.ground--
+			}
+			if v.IsGround() {
+				obj.ground++
+			}
+
+			// Update hash based on the new value
+			curr.value = v
+			obj.elems[hash] = curr
+			obj.hash = 0
+			for ehash := range obj.elems {
+				obj.hash += ehash + obj.elems[ehash].value.Hash()
+			}
+
+			return
+		}
+	}
+
+	// Use pre-allocated elem instead of creating new one
+	elem.key = k
+	elem.value = v
+	elem.next = head
+	obj.elems[hash] = elem
+
+	// O(1) insertion, but we'll have to re-sort the keys later.
+	obj.keys = append(obj.keys, elem)
+
+	if resetSortGuard {
 		obj.sortGuard = sync.Once{}
 	}
 
