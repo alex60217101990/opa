@@ -80,21 +80,37 @@ func InterfaceToValue(x any) (Value, error) {
 	case string:
 		return String(x), nil
 	case []any:
+		// Batch allocate both terms and hashes to avoid separate allocations
 		r := util.NewPtrSlice[Term](len(x))
+		hs := make([]int, len(x))
+		ground := true
 		for i, e := range x {
 			e, err := InterfaceToValue(e)
 			if err != nil {
 				return nil, err
 			}
 			r[i].Value = e
+			hs[i] = e.Hash()
+			if !e.IsGround() {
+				ground = false
+			}
 		}
-		return NewArray(r...), nil
+		// Create Array directly without variadic overhead
+		arr := &Array{elems: r, hashs: hs, ground: ground}
+		arr.rehash()
+		return arr, nil
 	case []string:
+		// Batch allocate both terms and hashes to avoid separate allocations
 		r := util.NewPtrSlice[Term](len(x))
+		hs := make([]int, len(x))
 		for i, e := range x {
 			r[i].Value = String(e)
+			hs[i] = r[i].Value.Hash()
 		}
-		return NewArray(r...), nil
+		// Create Array directly without variadic overhead (strings are always ground)
+		arr := &Array{elems: r, hashs: hs, ground: true}
+		arr.rehash()
+		return arr, nil
 	case map[string]any:
 		// Hybrid approach: use original code for small maps, batch allocation for large
 		// Threshold chosen based on benchmarking to balance performance across sizes
