@@ -140,6 +140,7 @@ func InternedValueOr[T internable](v T, supplier func(T) Value) Value {
 	switch value := any(v).(type) {
 	case bool:
 		return internedBooleanValue(value)
+	// Small signed integer types - safely fit in int, delegate to internedIntNumberValue
 	case int:
 		return internedIntNumberValue(value)
 	case int8:
@@ -148,19 +149,35 @@ func InternedValueOr[T internable](v T, supplier func(T) Value) Value {
 		return internedIntNumberValue(int(value))
 	case int32:
 		return internedIntNumberValue(int(value))
-	case int64:
-		return internedIntNumberValue(int(value))
-	case uint:
-		return internedIntNumberValue(int(value))
 	case uint8:
+		// uint8 max is 255, always in cached range
 		return internedIntNumberValue(int(value))
+	// Larger types - check range before conversion to avoid overflow
+	case int64:
+		if value >= -1 && value < int64(len(intNumberTerms)) {
+			return internedIntNumberValue(int(value))
+		}
+		// Value outside cached range, fall through to supplier
+	// Unsigned types - check if in cached range
+	case uint:
+		if value < uint(len(intNumberTerms)) {
+			return internedIntNumberValue(int(value))
+		}
 	case uint16:
-		return internedIntNumberValue(int(value))
+		if value < uint16(len(intNumberTerms)) {
+			return internedIntNumberValue(int(value))
+		}
 	case uint32:
-		return internedIntNumberValue(int(value))
+		if value < uint32(len(intNumberTerms)) {
+			return internedIntNumberValue(int(value))
+		}
 	case uint64:
-		return internedIntNumberValue(int(value))
+		if value < uint64(len(intNumberTerms)) {
+			return internedIntNumberValue(int(value))
+		}
 	}
+
+	// Fallback for values outside cached range or string type
 	return supplier(v)
 }
 
@@ -172,6 +189,7 @@ func InternedTerm[T internable](v T) *Term {
 		return internedBooleanTerm(value)
 	case string:
 		return internedStringTerm(value)
+	// Small signed integer types - safely fit in int
 	case int:
 		return internedIntNumberTerm(value)
 	case int8:
@@ -180,18 +198,36 @@ func InternedTerm[T internable](v T) *Term {
 		return internedIntNumberTerm(int(value))
 	case int32:
 		return internedIntNumberTerm(int(value))
-	case int64:
-		return internedIntNumberTerm(int(value))
-	case uint:
-		return internedIntNumberTerm(int(value))
 	case uint8:
 		return internedIntNumberTerm(int(value))
+	// Larger types - check range before conversion to avoid overflow
+	case int64:
+		// Only use interning if value fits in cached range
+		if value >= -1 && value < int64(len(intNumberTerms)) {
+			return internedIntNumberTerm(int(value))
+		}
+		// Fall back to creating new term
+		return &Term{Value: Number(strconv.FormatInt(value, 10))}
+	case uint:
+		if value < uint(len(intNumberTerms)) {
+			return internedIntNumberTerm(int(value))
+		}
+		return &Term{Value: Number(strconv.FormatUint(uint64(value), 10))}
 	case uint16:
-		return internedIntNumberTerm(int(value))
+		if value < uint16(len(intNumberTerms)) {
+			return internedIntNumberTerm(int(value))
+		}
+		return &Term{Value: Number(strconv.FormatUint(uint64(value), 10))}
 	case uint32:
-		return internedIntNumberTerm(int(value))
+		if value < uint32(len(intNumberTerms)) {
+			return internedIntNumberTerm(int(value))
+		}
+		return &Term{Value: Number(strconv.FormatUint(uint64(value), 10))}
 	case uint64:
-		return internedIntNumberTerm(int(value))
+		if value < uint64(len(intNumberTerms)) {
+			return internedIntNumberTerm(int(value))
+		}
+		return &Term{Value: Number(strconv.FormatUint(value, 10))}
 	default:
 		panic("unreachable")
 	}

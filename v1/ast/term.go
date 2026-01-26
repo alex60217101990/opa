@@ -57,6 +57,24 @@ type Value interface {
 
 // InterfaceToValue converts a native Go value x to a Value.
 func InterfaceToValue(x any) (Value, error) {
+	// Use local string cache for large conversions to deduplicate repeated strings
+	// Heuristic: arrays with >10 elements or maps with >20 keys benefit from caching
+	var cache map[string]Value
+	switch v := x.(type) {
+	case []any:
+		if len(v) > 10 {
+			cache = make(map[string]Value, 32) // Pre-allocate for common keys
+		}
+	case map[string]any:
+		if len(v) > 20 {
+			cache = make(map[string]Value, 16)
+		}
+	}
+	return interfaceToValueWithCache(x, cache)
+}
+
+// interfaceToValueWithCache is the internal implementation that supports string caching
+func interfaceToValueWithCache(x any, cache map[string]Value) (Value, error) {
 	switch x := x.(type) {
 	case Value:
 		return x, nil
@@ -78,6 +96,26 @@ func InterfaceToValue(x any) (Value, error) {
 	case float64:
 		return floatNumber(x), nil
 	case string:
+		// Try cache first (if enabled)
+		if cache != nil {
+			// Check predefined interned strings first (fast path, no allocation)
+			if len(x) <= 16 {
+				if interned, ok := internedStringTerms[x]; ok {
+					return interned.Value, nil
+				}
+			}
+			// Check local cache
+			if cached, ok := cache[x]; ok {
+				return cached, nil
+			}
+			// Not cached - create and cache if reasonable size
+			v := String(x)
+			if len(x) <= 64 && len(cache) < 256 { // Limit cache size
+				cache[x] = v
+			}
+			return v, nil
+		}
+		// No cache - direct creation
 		return String(x), nil
 	case []any:
 		// Batch allocate both terms and hashes to avoid separate allocations
@@ -85,7 +123,8 @@ func InterfaceToValue(x any) (Value, error) {
 		hs := make([]int, len(x))
 		ground := true
 		for i, e := range x {
-			e, err := InterfaceToValue(e)
+			// Recursive call with cache propagation
+			e, err := interfaceToValueWithCache(e, cache)
 			if err != nil {
 				return nil, err
 			}
@@ -121,8 +160,21 @@ func InterfaceToValue(x any) (Value, error) {
 			kvs := util.NewPtrSlice[Term](len(x) * 2)
 			idx := 0
 			for k, v := range x {
-				kvs[idx].Value = String(k)
-				v, err := InterfaceToValue(v)
+				// Cache keys if caching is enabled
+				if cache != nil && len(k) <= 64 {
+					if cached, ok := cache[k]; ok {
+						kvs[idx].Value = cached
+					} else {
+						kvs[idx].Value = String(k)
+						if len(cache) < 256 {
+							cache[k] = kvs[idx].Value
+						}
+					}
+				} else {
+					kvs[idx].Value = String(k)
+				}
+				// Recursive call for value
+				v, err := interfaceToValueWithCache(v, cache)
 				if err != nil {
 					return nil, err
 				}
@@ -142,8 +194,21 @@ func InterfaceToValue(x any) (Value, error) {
 		r := newobject(len(x))
 		idx := 0
 		for k, v := range x {
-			kvs[idx].Value = String(k)
-			v, err := InterfaceToValue(v)
+			// Cache keys if caching is enabled
+			if cache != nil && len(k) <= 64 {
+				if cached, ok := cache[k]; ok {
+					kvs[idx].Value = cached
+				} else {
+					kvs[idx].Value = String(k)
+					if len(cache) < 256 {
+						cache[k] = kvs[idx].Value
+					}
+				}
+			} else {
+				kvs[idx].Value = String(k)
+			}
+			// Recursive call for value
+			v, err := interfaceToValueWithCache(v, cache)
 			if err != nil {
 				return nil, err
 			}
@@ -173,7 +238,12 @@ func InterfaceToValue(x any) (Value, error) {
 		idx := 0
 		for k, v := range x {
 			kvs[idx].Value = String(k)
-			kvs[idx+1].Value = newIntNumberValue(v)
+			// Use interning only for values in cached range
+			if (v >= 0 && v < len(intNumberTerms)) || v == -1 {
+				kvs[idx+1].Value = InternedValue(v)
+			} else {
+				kvs[idx+1].Value = Number(strconv.Itoa(v))
+			}
 			r.insertWithElem(&elems[idx/2], kvs[idx], kvs[idx+1], false)
 			idx += 2
 		}
@@ -836,14 +906,26 @@ func (num Number) String() string {
 }
 
 func newIntNumberValue(i int) Value {
+	// Use interning only for values in cached range
+	if (i >= 0 && i < len(intNumberTerms)) || i == -1 {
+		return InternedValue(i)
+	}
 	return Number(strconv.Itoa(i))
 }
 
 func newInt64NumberValue(i int64) Value {
+	// Use interning only for values in cached range
+	if (i >= 0 && i < int64(len(intNumberTerms))) || i == -1 {
+		return InternedValue(i)
+	}
 	return Number(strconv.FormatInt(i, 10))
 }
 
 func newUint64NumberValue(u uint64) Value {
+	// Use interning only for values in cached range
+	if u < uint64(len(intNumberTerms)) {
+		return InternedValue(u)
+	}
 	return Number(strconv.FormatUint(u, 10))
 }
 
