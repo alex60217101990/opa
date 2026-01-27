@@ -75,30 +75,6 @@ const (
 	batchThreshold = 16
 )
 
-// stringCachePool provides pooled maps for string caching.
-// Direct map usage eliminates struct overhead for maximum performance.
-var stringCachePool = sync.Pool{
-	New: func() any {
-		m := make(map[string]Value, initialCacheSize)
-		return &m
-	},
-}
-
-// getStringCache retrieves a map from the pool
-func getStringCache() map[string]Value {
-	return *stringCachePool.Get().(*map[string]Value)
-}
-
-// releaseStringCache clears and returns the map to the pool
-func releaseStringCache(cache map[string]Value) {
-	// If map grew too large, don't pool it (let GC handle)
-	if len(cache) > maxPooledCacheSize {
-		return
-	}
-	clear(cache)
-	stringCachePool.Put(&cache)
-}
-
 // InterfaceToValue converts a native Go value x to a Value.
 func InterfaceToValue(x any) (Value, error) {
 	// Use pooled map for string caching in large conversions.

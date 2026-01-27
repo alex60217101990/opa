@@ -20,6 +20,15 @@ var (
 			},
 		},
 	}
+
+	// stringCachePool provides pooled maps for string caching.
+	// Direct map usage eliminates struct overhead for maximum performance.
+	stringCachePool = sync.Pool{
+		New: func() any {
+			m := make(map[string]Value, initialCacheSize)
+			return &m
+		},
+	}
 )
 
 type vvPool struct {
@@ -35,4 +44,19 @@ func (p *vvPool) Put(vv *VarVisitor) {
 		vv.Clear()
 		p.pool.Put(vv)
 	}
+}
+
+// getStringCache retrieves a map from the pool
+func getStringCache() map[string]Value {
+	return *stringCachePool.Get().(*map[string]Value)
+}
+
+// releaseStringCache clears and returns the map to the pool
+func releaseStringCache(cache map[string]Value) {
+	// If map grew too large, don't pool it (let GC handle)
+	if len(cache) > maxPooledCacheSize {
+		return
+	}
+	clear(cache)
+	stringCachePool.Put(&cache)
 }
