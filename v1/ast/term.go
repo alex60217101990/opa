@@ -58,16 +58,17 @@ type Value interface {
 // InterfaceToValue converts a native Go value x to a Value.
 func InterfaceToValue(x any) (Value, error) {
 	// Use local string cache for large conversions to deduplicate repeated strings
-	// Heuristic: arrays with >10 elements or maps with >20 keys benefit from caching
+	// Higher thresholds reduce memory overhead for unique strings while still benefiting
+	// structures with repeated keys (e.g., JSON API responses with common field names)
 	var cache map[string]Value
 	switch v := x.(type) {
 	case []any:
-		if len(v) > 10 {
-			cache = make(map[string]Value, 32) // Pre-allocate for common keys
+		if len(v) > 30 {
+			cache = make(map[string]Value, 64) // Pre-allocate for common keys
 		}
 	case map[string]any:
-		if len(v) > 20 {
-			cache = make(map[string]Value, 16)
+		if len(v) > 50 {
+			cache = make(map[string]Value, 32)
 		}
 	}
 	return interfaceToValueWithCache(x, cache)
