@@ -127,6 +127,35 @@ func InterfaceToValue(x any) (Value, error) {
 	return result, err
 }
 
+// stringToValueWithCache converts a string to a Value using cache when available.
+// This function encapsulates the common string handling logic used by case string and case []string.
+func stringToValueWithCache(s string, cache map[string]Value) Value {
+	// Fast path: if no cache, create directly (for small datasets)
+	if cache == nil {
+		return String(s)
+	}
+
+	// Cache is enabled (large datasets)
+	// CRITICAL: Check cache first! For repeated keys this avoids interning lookup.
+	if cached, ok := cache[s]; ok {
+		return cached
+	}
+
+	// Cache miss - check predefined interned strings (common keys: "id", "name", etc)
+	if len(s) <= maxInternedStringLen {
+		if interned, ok := internedStringTerms[s]; ok {
+			return interned.Value
+		}
+	}
+
+	// Not in cache or interned - create and cache
+	v := String(s)
+	if len(s) <= maxCachedStringLen && len(cache) < maxCacheSize {
+		cache[s] = v
+	}
+	return v
+}
+
 // interfaceToValueWithCache is the internal implementation that supports string caching
 func interfaceToValueWithCache(x any, cache map[string]Value) (Value, error) {
 	switch x := x.(type) {
@@ -150,28 +179,7 @@ func interfaceToValueWithCache(x any, cache map[string]Value) (Value, error) {
 	case float64:
 		return floatNumber(x), nil
 	case string:
-		// Fast path: if no cache, create directly (for small datasets)
-		if cache == nil {
-			return String(x), nil
-		}
-		// Cache is enabled (large datasets)
-		// CRITICAL: Check cache first! For repeated keys this avoids interning lookup.
-		// For size_100 scenario: 99/100 objects hit cache, avoiding 693 interning checks!
-		if cached, ok := cache[x]; ok {
-			return cached, nil
-		}
-		// Cache miss - check predefined interned strings (common keys: "id", "name", etc)
-		if len(x) <= maxInternedStringLen {
-			if interned, ok := internedStringTerms[x]; ok {
-				return interned.Value, nil
-			}
-		}
-		// Not in cache or interned - create and cache
-		v := String(x)
-		if len(x) <= maxCachedStringLen && len(cache) < maxCacheSize {
-			cache[x] = v
-		}
-		return v, nil
+		return stringToValueWithCache(x, cache), nil
 	case []any:
 		// Batch allocate both terms and hashes to avoid separate allocations
 		r := util.NewPtrSlice[Term](len(x))
@@ -198,32 +206,7 @@ func interfaceToValueWithCache(x any, cache map[string]Value) (Value, error) {
 		r := util.NewPtrSlice[Term](len(x))
 		hs := make([]int, len(x))
 		for i, e := range x {
-			// Fast path: if no cache, create directly
-			if cache == nil {
-				r[i].Value = String(e)
-			} else {
-				// Cache enabled - check cache first (FAST PATH for repeated strings)
-				if cached, ok := cache[e]; ok {
-					r[i].Value = cached
-				} else if len(e) <= maxInternedStringLen {
-					// Cache miss - check interning
-					if internedVal, ok := internedStringTerms[e]; ok {
-						r[i].Value = internedVal.Value
-					} else {
-						// Not interned - create and cache
-						r[i].Value = String(e)
-						if len(e) <= maxCachedStringLen && len(cache) < maxCacheSize {
-							cache[e] = r[i].Value
-						}
-					}
-				} else {
-					// Too long for interning - create and cache
-					r[i].Value = String(e)
-					if len(e) <= maxCachedStringLen && len(cache) < maxCacheSize {
-						cache[e] = r[i].Value
-					}
-				}
-			}
+			r[i].Value = stringToValueWithCache(e, cache)
 			hs[i] = r[i].Value.Hash()
 		}
 		// Create Array directly without variadic overhead (strings are always ground)
@@ -238,32 +221,7 @@ func interfaceToValueWithCache(x any, cache map[string]Value) (Value, error) {
 			kvs := util.NewPtrSlice[Term](len(x) * 2)
 			idx := 0
 			for k, v := range x {
-				// Fast path: if no cache, create directly
-				if cache == nil {
-					kvs[idx].Value = String(k)
-				} else {
-					// Cache enabled - check cache first (FAST PATH for repeated keys)
-					if cached, ok := cache[k]; ok {
-						kvs[idx].Value = cached
-					} else if len(k) <= maxInternedStringLen {
-						// Cache miss - check interning (common keys like "id", "name", "type")
-						if internedVal, ok := internedStringTerms[k]; ok {
-							kvs[idx].Value = internedVal.Value
-						} else {
-							// Not interned - create and cache
-							kvs[idx].Value = String(k)
-							if len(k) <= maxCachedStringLen && len(cache) < maxCacheSize {
-								cache[k] = kvs[idx].Value
-							}
-						}
-					} else {
-						// Too long for interning - create and cache
-						kvs[idx].Value = String(k)
-						if len(k) <= maxCachedStringLen && len(cache) < maxCacheSize {
-							cache[k] = kvs[idx].Value
-						}
-					}
-				}
+				kvs[idx].Value = stringToValueWithCache(k, cache)
 				// Recursive call for value
 				v, err := interfaceToValueWithCache(v, cache)
 				if err != nil {
@@ -285,32 +243,7 @@ func interfaceToValueWithCache(x any, cache map[string]Value) (Value, error) {
 		r := newobject(len(x))
 		idx := 0
 		for k, v := range x {
-			// Fast path: if no cache, create directly
-			if cache == nil {
-				kvs[idx].Value = String(k)
-			} else {
-				// Cache enabled - check cache first (FAST PATH for repeated keys)
-				if cached, ok := cache[k]; ok {
-					kvs[idx].Value = cached
-				} else if len(k) <= maxInternedStringLen {
-					// Cache miss - check interning (common keys like "id", "name", "type")
-					if internedVal, ok := internedStringTerms[k]; ok {
-						kvs[idx].Value = internedVal.Value
-					} else {
-						// Not interned - create and cache
-						kvs[idx].Value = String(k)
-						if len(k) <= maxCachedStringLen && len(cache) < maxCacheSize {
-							cache[k] = kvs[idx].Value
-						}
-					}
-				} else {
-					// Too long for interning - create and cache
-					kvs[idx].Value = String(k)
-					if len(k) <= maxCachedStringLen && len(cache) < maxCacheSize {
-						cache[k] = kvs[idx].Value
-					}
-				}
-			}
+			kvs[idx].Value = stringToValueWithCache(k, cache)
 			// Recursive call for value
 			v, err := interfaceToValueWithCache(v, cache)
 			if err != nil {
@@ -328,48 +261,8 @@ func interfaceToValueWithCache(x any, cache map[string]Value) (Value, error) {
 		r := newobject(len(x))
 		idx := 0
 		for k, v := range x {
-			// Fast path: if no cache, create directly
-			if cache == nil {
-				kvs[idx].Value = String(k)
-				kvs[idx+1].Value = String(v)
-			} else {
-				// Cache enabled - check cache first for keys (FAST PATH)
-				if cached, ok := cache[k]; ok {
-					kvs[idx].Value = cached
-				} else if len(k) <= maxInternedStringLen {
-					if internedVal, ok := internedStringTerms[k]; ok {
-						kvs[idx].Value = internedVal.Value
-					} else {
-						kvs[idx].Value = String(k)
-						if len(k) <= maxCachedStringLen && len(cache) < maxCacheSize {
-							cache[k] = kvs[idx].Value
-						}
-					}
-				} else {
-					kvs[idx].Value = String(k)
-					if len(k) <= maxCachedStringLen && len(cache) < maxCacheSize {
-						cache[k] = kvs[idx].Value
-					}
-				}
-				// Check cache first for values (FAST PATH)
-				if cached, ok := cache[v]; ok {
-					kvs[idx+1].Value = cached
-				} else if len(v) <= maxInternedStringLen {
-					if internedVal, ok := internedStringTerms[v]; ok {
-						kvs[idx+1].Value = internedVal.Value
-					} else {
-						kvs[idx+1].Value = String(v)
-						if len(v) <= maxCachedStringLen && len(cache) < maxCacheSize {
-							cache[v] = kvs[idx+1].Value
-						}
-					}
-				} else {
-					kvs[idx+1].Value = String(v)
-					if len(v) <= maxCachedStringLen && len(cache) < maxCacheSize {
-						cache[v] = kvs[idx+1].Value
-					}
-				}
-			}
+			kvs[idx].Value = stringToValueWithCache(k, cache)
+			kvs[idx+1].Value = stringToValueWithCache(v, cache)
 			r.insertWithElem(&elems[idx/2], kvs[idx], kvs[idx+1], false)
 			idx += 2
 		}
@@ -381,29 +274,7 @@ func interfaceToValueWithCache(x any, cache map[string]Value) (Value, error) {
 		r := newobject(len(x))
 		idx := 0
 		for k, v := range x {
-			// Fast path: if no cache, create directly
-			if cache == nil {
-				kvs[idx].Value = String(k)
-			} else {
-				// Cache enabled - check cache first for keys (FAST PATH)
-				if cached, ok := cache[k]; ok {
-					kvs[idx].Value = cached
-				} else if len(k) <= maxInternedStringLen {
-					if internedVal, ok := internedStringTerms[k]; ok {
-						kvs[idx].Value = internedVal.Value
-					} else {
-						kvs[idx].Value = String(k)
-						if len(k) <= maxCachedStringLen && len(cache) < maxCacheSize {
-							cache[k] = kvs[idx].Value
-						}
-					}
-				} else {
-					kvs[idx].Value = String(k)
-					if len(k) <= maxCachedStringLen && len(cache) < maxCacheSize {
-						cache[k] = kvs[idx].Value
-					}
-				}
-			}
+			kvs[idx].Value = stringToValueWithCache(k, cache)
 			// Use interning only for values in cached range
 			if (v >= 0 && v < len(intNumberTerms)) || v == -1 {
 				kvs[idx+1].Value = InternedValue(v)
@@ -421,29 +292,7 @@ func interfaceToValueWithCache(x any, cache map[string]Value) (Value, error) {
 		r := newobject(len(x))
 		idx := 0
 		for k, v := range x {
-			// Fast path: if no cache, create directly
-			if cache == nil {
-				kvs[idx].Value = String(k)
-			} else {
-				// Cache enabled - check cache first for keys (FAST PATH)
-				if cached, ok := cache[k]; ok {
-					kvs[idx].Value = cached
-				} else if len(k) <= maxInternedStringLen {
-					if internedVal, ok := internedStringTerms[k]; ok {
-						kvs[idx].Value = internedVal.Value
-					} else {
-						kvs[idx].Value = String(k)
-						if len(k) <= maxCachedStringLen && len(cache) < maxCacheSize {
-							cache[k] = kvs[idx].Value
-						}
-					}
-				} else {
-					kvs[idx].Value = String(k)
-					if len(k) <= maxCachedStringLen && len(cache) < maxCacheSize {
-						cache[k] = kvs[idx].Value
-					}
-				}
-			}
+			kvs[idx].Value = stringToValueWithCache(k, cache)
 			kvs[idx+1].Value = internedBooleanValue(v)
 			r.insertWithElem(&elems[idx/2], kvs[idx], kvs[idx+1], false)
 			idx += 2
