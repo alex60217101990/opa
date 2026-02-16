@@ -1429,6 +1429,9 @@ func (c *Compiler) checkRuleConflicts() {
 func (c *Compiler) checkUndefinedFuncs() {
 	for _, name := range c.sorted {
 		m := c.Modules[name]
+		if m.Metadata != nil && m.Metadata.FunctionRefCount() == 0 {
+			continue
+		}
 		c.err(checkUndefinedFuncs(c.TypeEnv, m, c.GetArity, c.RewrittenVars)...)
 	}
 }
@@ -2345,6 +2348,10 @@ func (tsr *templateStringRewriter) Clear() *templateStringRewriter {
 
 // rewriteTemplateStrings rewrites template-string calls as they appear in bodies; e.g. rules, comprehensions, etc.
 func (c *Compiler) rewriteTemplateStrings() {
+	if c.canSkipTemplateStringRewrite() {
+		return
+	}
+
 	tsr := rewriterFromCompiler(c)
 	modified := false
 	for _, name := range c.sorted {
@@ -2377,6 +2384,16 @@ func (c *Compiler) rewriteTemplateStrings() {
 	if modified {
 		c.Required.addBuiltinSorted(InternalTemplateString)
 	}
+}
+
+func (c *Compiler) canSkipTemplateStringRewrite() bool {
+	for _, name := range c.sorted {
+		mod := c.Modules[name]
+		if mod.Metadata == nil || mod.Metadata.HasTemplateStrings() {
+			return false
+		}
+	}
+	return true
 }
 
 func rewriteTemplateStrings(tsr *templateStringRewriter, globals VarSet, x any) (bool, VarSet, Errors) {
@@ -2554,6 +2571,10 @@ func rewriteTemplateString(tsr *templateStringRewriter, safe VarSet, loc *Locati
 }
 
 func (c *Compiler) rewritePrintCalls() {
+	if !c.enablePrintStatements && c.canSkipPrintRewrite() {
+		return
+	}
+
 	var modified bool
 	if !c.enablePrintStatements {
 		for _, name := range c.sorted {
@@ -2593,6 +2614,26 @@ func (c *Compiler) rewritePrintCalls() {
 	if modified {
 		c.Required.addBuiltinSorted(Print)
 	}
+}
+
+func (c *Compiler) canSkipPrintRewrite() bool {
+	for _, name := range c.sorted {
+		mod := c.Modules[name]
+		if mod.Metadata == nil || mod.Metadata.HasPrintCalls() {
+			return false
+		}
+	}
+	return true
+}
+
+func (c *Compiler) hasMetadataBlocksOrCalls() bool {
+	for _, name := range c.sorted {
+		mod := c.Modules[name]
+		if mod.Metadata == nil || mod.Metadata.HasMetadataBlocks() || mod.Metadata.HasMetadataCalls() {
+			return true
+		}
+	}
+	return false
 }
 
 // checkVoidCalls returns errors for any expressions that treat void function
@@ -2887,10 +2928,18 @@ func (c *Compiler) rewriteTestRuleEqualities() {
 }
 
 func (c *Compiler) parseMetadataBlocks() {
-	// Only parse annotations if rego.metadata built-ins are called
+	if !c.hasMetadataBlocksOrCalls() {
+		return
+	}
+
 	regoMetadataCalled := false
 	for _, name := range c.sorted {
-		WalkExprs(c.Modules[name], func(expr *Expr) bool {
+		mod := c.Modules[name]
+		if mod.Metadata != nil && !mod.Metadata.HasMetadataCalls() {
+			continue
+		}
+
+		WalkExprs(mod, func(expr *Expr) bool {
 			if isRegoMetadataChainCall(expr) || isRegoMetadataRuleCall(expr) {
 				regoMetadataCalled = true
 			}
@@ -2920,13 +2969,22 @@ func (c *Compiler) parseMetadataBlocks() {
 }
 
 func (c *Compiler) rewriteRegoMetadataCalls() {
+	if !c.hasMetadataBlocksOrCalls() {
+		return
+	}
+
 	eqFactory := newEqualityFactory(c.localvargen)
 
 	_, chainFuncAllowed := c.builtins[RegoMetadataChain.Name]
 	_, ruleFuncAllowed := c.builtins[RegoMetadataRule.Name]
 
 	for _, name := range c.sorted {
-		WalkRules(c.Modules[name], func(rule *Rule) bool {
+		mod := c.Modules[name]
+		if mod.Metadata != nil && !mod.Metadata.HasMetadataCalls() {
+			continue
+		}
+
+		WalkRules(mod, func(rule *Rule) bool {
 			var firstChainCall, firstRuleCall *Expr
 
 			WalkExprs(rule, func(expr *Expr) bool {

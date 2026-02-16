@@ -474,7 +474,7 @@ func ParseModuleWithOpts(filename, input string, popts ParserOptions) (*Module, 
 	if err != nil {
 		return nil, err
 	}
-	return parseModule(filename, stmts, comments, popts.RegoVersion)
+	return parseModule(filename, stmts, comments, popts)
 }
 
 // ParseBody returns exactly one body.
@@ -643,7 +643,7 @@ func ParseStatementsWithOpts(filename, input string, popts ParserOptions) ([]Sta
 	return stmts, comments, nil
 }
 
-func parseModule(filename string, stmts []Statement, comments []*Comment, regoCompatibilityMode RegoVersion) (*Module, error) {
+func parseModule(filename string, stmts []Statement, comments []*Comment, popts ParserOptions) (*Module, error) {
 	if len(stmts) == 0 {
 		return nil, NewError(ParseErr, &Location{File: filename}, "empty module")
 	}
@@ -663,9 +663,15 @@ func parseModule(filename string, stmts []Statement, comments []*Comment, regoCo
 		stmts:    stmts,
 	}
 
+	regoCompatibilityMode := popts.RegoVersion
 	mod.regoVersion = regoCompatibilityMode
 	if regoCompatibilityMode == RegoUndefined {
 		mod.regoVersion = DefaultRegoVersion
+	}
+
+	// Initialize metadata collection if enabled
+	if popts.CollectMetadata {
+		mod.Metadata = NewParserMetadata()
 	}
 
 	for i, stmt := range stmts[1:] {
@@ -721,6 +727,10 @@ func parseModule(filename string, stmts []Statement, comments []*Comment, regoCo
 	}
 
 	attachRuleAnnotations(mod)
+
+	if popts.CollectMetadata && mod.Metadata != nil {
+		collectModuleMetadata(mod)
+	}
 
 	return mod, nil
 }
@@ -805,4 +815,65 @@ func (d ParserErrorDetail) Lines() []string {
 
 func isNewLineChar(b byte) bool {
 	return b == '\r' || b == '\n'
+}
+
+func collectModuleMetadata(mod *Module) {
+	if mod.Metadata == nil {
+		return
+	}
+
+	WalkRules(mod, func(r *Rule) bool {
+		WalkTerms(r.Head, func(t *Term) bool {
+			if _, ok := t.Value.(*TemplateString); ok {
+				mod.Metadata.MarkTemplateString()
+			}
+			return false
+		})
+
+		WalkExprs(r, func(e *Expr) bool {
+			if e.IsCall() {
+				ref := e.Operator()
+				refStr := ref.String()
+				if refStr == "print" {
+					mod.Metadata.MarkPrintCall()
+				} else if len(refStr) > 13 && refStr[:13] == "rego.metadata" {
+					mod.Metadata.MarkMetadataCall()
+				}
+				mod.Metadata.AddFunctionRef(ref)
+			}
+
+			WalkTerms(e, func(t *Term) bool {
+				if call, ok := t.Value.(Call); ok {
+					if len(call) > 0 {
+						if ref, ok := call[0].Value.(Ref); ok {
+							refStr := ref.String()
+							if refStr == "print" {
+								mod.Metadata.MarkPrintCall()
+							} else if len(refStr) > 13 && refStr[:13] == "rego.metadata" {
+								mod.Metadata.MarkMetadataCall()
+							}
+							mod.Metadata.AddFunctionRef(ref)
+						}
+					}
+				}
+				if _, ok := t.Value.(*TemplateString); ok {
+					mod.Metadata.MarkTemplateString()
+				}
+				return false
+			})
+
+			return false
+		})
+
+		return false
+	})
+
+	if len(mod.Annotations) > 0 {
+		for _, ann := range mod.Annotations {
+			if ann.Scope == "document" || ann.Scope == "rule" || ann.Scope == "package" {
+				mod.Metadata.MarkMetadataBlock()
+				break
+			}
+		}
+	}
 }

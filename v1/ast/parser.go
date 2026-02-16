@@ -186,6 +186,12 @@ type ParserOptions struct {
 	// RegoVersion is the version of Rego to parse for.
 	RegoVersion        RegoVersion
 	unreleasedKeywords bool // TODO(sr): cleanup
+	// CollectMetadata enables parser metadata collection for compiler optimization.
+	// When enabled, the parser collects information about language features used
+	// in the module (e.g., print calls, template strings, function references).
+	// This metadata allows the compiler to skip unnecessary AST traversals.
+	// Default: false (for backward compatibility). See issue #8269.
+	CollectMetadata bool
 }
 
 // EffectiveRegoVersion returns the effective RegoVersion to use for parsing.

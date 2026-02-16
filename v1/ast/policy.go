@@ -198,6 +198,10 @@ type (
 		Comments    []*Comment     `json:"comments,omitempty"`
 		stmts       []Statement
 		regoVersion RegoVersion
+		// Metadata contains optional parser-collected information about the module
+		// that can be used to optimize compilation stages. If nil, compiler performs
+		// full AST traversals. See issue #8269.
+		Metadata *ParserMetadata `json:"-"`
 	}
 
 	// Comment contains the raw text from the comment in the definition.
