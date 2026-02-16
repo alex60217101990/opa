@@ -6,12 +6,13 @@ package ast
 
 // ParserMetadata contains information collected during parsing to optimize
 // compilation. If nil or unpopulated, compiler falls back to full traversal.
+// Fields ordered from largest to smallest to minimize padding.
 type ParserMetadata struct {
-	flags               uint16
 	functionRefs        []Ref
 	builtinRefs         map[string]struct{}
 	printCallCount      int
 	templateStringCount int
+	flags               uint16
 }
 
 const (
@@ -23,8 +24,7 @@ const (
 
 func NewParserMetadata() *ParserMetadata {
 	return &ParserMetadata{
-		functionRefs: make([]Ref, 0, 8),
-		builtinRefs:  make(map[string]struct{}),
+		builtinRefs: make(map[string]struct{}),
 	}
 }
 
