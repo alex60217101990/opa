@@ -24,7 +24,6 @@ import (
 	"time"
 
 	"github.com/open-policy-agent/opa/internal/file/archive"
-	"github.com/open-policy-agent/opa/internal/runtime"
 	"github.com/open-policy-agent/opa/v1/ast"
 	"github.com/open-policy-agent/opa/v1/bundle"
 	"github.com/open-policy-agent/opa/v1/config"
@@ -33,6 +32,7 @@ import (
 	"github.com/open-policy-agent/opa/v1/logging"
 	"github.com/open-policy-agent/opa/v1/metrics"
 	"github.com/open-policy-agent/opa/v1/plugins"
+	"github.com/open-policy-agent/opa/v1/runtime/info"
 	"github.com/open-policy-agent/opa/v1/storage"
 	"github.com/open-policy-agent/opa/v1/storage/disk"
 	"github.com/open-policy-agent/opa/v1/storage/inmem"
@@ -570,11 +570,11 @@ func TestPluginOneShotWithAuthzSchemaVerification(t *testing.T) {
 	manager := getTestManager()
 	defer manager.Stop(ctx)
 
-	info, err := runtime.Term(runtime.Params{Config: nil, IsAuthorizationEnabled: true})
+	runtimeInfo, err := info.NewWithOptions(info.Options{Config: nil, IsAuthorizationEnabled: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	manager.Info = info
+	manager.Info = runtimeInfo
 
 	plugin := New(&Config{}, manager)
 
@@ -684,11 +684,11 @@ func TestPluginOneShotWithAuthzSchemaVerification(t *testing.T) {
 	}
 
 	// disable authorization to ensure bundle activates with bad authz policy
-	info, err = runtime.Term(runtime.Params{Config: nil, IsAuthorizationEnabled: false})
+	runtimeInfo, err = info.NewWithOptions(info.Options{Config: nil, IsAuthorizationEnabled: false})
 	if err != nil {
 		t.Fatal(err)
 	}
-	plugin.manager.Info = info
+	plugin.manager.Info = runtimeInfo
 
 	err = plugin.oneShot(ctx, bundleName, download.Update{Bundle: &b, Metrics: metrics.New()})
 	if err != nil {
@@ -702,11 +702,11 @@ func TestPluginOneShotWithAuthzSchemaVerification(t *testing.T) {
 	}
 
 	// enable authorization but skip type checking of known input schemas
-	info, err = runtime.Term(runtime.Params{Config: nil, IsAuthorizationEnabled: true, SkipKnownSchemaCheck: true})
+	runtimeInfo, err = info.NewWithOptions(info.Options{Config: nil, IsAuthorizationEnabled: true, SkipKnownSchemaCheck: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	plugin.manager.Info = info
+	plugin.manager.Info = runtimeInfo
 
 	err = plugin.oneShot(ctx, bundleName, download.Update{Bundle: &b, Metrics: metrics.New()})
 	if err != nil {
@@ -736,11 +736,11 @@ func TestPluginOneShotWithAuthzSchemaVerificationNonDefaultAuthzPath(t *testing.
 		t.Fatal(err)
 	}
 
-	info, err := runtime.Term(runtime.Params{Config: nil, IsAuthorizationEnabled: true})
+	runtimeInfo, err := info.NewWithOptions(info.Options{Config: nil, IsAuthorizationEnabled: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	manager.Info = info
+	manager.Info = runtimeInfo
 
 	plugin := New(&Config{}, manager)
 
@@ -4311,7 +4311,8 @@ func TestPluginRequestVsDownloadTimestamp(t *testing.T) {
 	// simulate HTTP 200 response from downloader
 	_ = plugin.oneShot(ctx, bundleName, download.Update{Bundle: b})
 
-	if plugin.status[bundleName].LastSuccessfulDownload != plugin.status[bundleName].LastSuccessfulRequest || plugin.status[bundleName].LastSuccessfulDownload != plugin.status[bundleName].LastRequest {
+	if !plugin.status[bundleName].LastSuccessfulDownload.Equal(plugin.status[bundleName].LastSuccessfulRequest) ||
+		!plugin.status[bundleName].LastSuccessfulDownload.Equal(plugin.status[bundleName].LastRequest) {
 		t.Fatal("expected last successful request to be same as download and request")
 	}
 
@@ -4321,21 +4322,24 @@ func TestPluginRequestVsDownloadTimestamp(t *testing.T) {
 	// simulate HTTP 304 response from downloader.
 	_ = plugin.oneShot(ctx, bundleName, download.Update{Bundle: nil})
 
-	if plugin.status[bundleName].LastSuccessfulDownload == plugin.status[bundleName].LastSuccessfulRequest || plugin.status[bundleName].LastSuccessfulDownload == plugin.status[bundleName].LastRequest {
+	if plugin.status[bundleName].LastSuccessfulDownload.Equal(plugin.status[bundleName].LastSuccessfulRequest) ||
+		plugin.status[bundleName].LastSuccessfulDownload.Equal(plugin.status[bundleName].LastRequest) {
 		t.Fatal("expected last successful request to differ from download and request")
 	}
 
 	// simulate HTTP 200 response from downloader
 	_ = plugin.oneShot(ctx, bundleName, download.Update{Bundle: b})
 
-	if plugin.status[bundleName].LastSuccessfulDownload != plugin.status[bundleName].LastSuccessfulRequest || plugin.status[bundleName].LastSuccessfulDownload != plugin.status[bundleName].LastRequest {
+	if !plugin.status[bundleName].LastSuccessfulDownload.Equal(plugin.status[bundleName].LastSuccessfulRequest) ||
+		!plugin.status[bundleName].LastSuccessfulDownload.Equal(plugin.status[bundleName].LastRequest) {
 		t.Fatal("expected last successful request to be same as download and request")
 	}
 
 	// simulate error response from downloader
 	_ = plugin.oneShot(ctx, bundleName, download.Update{Error: errors.New("xxx")})
 
-	if plugin.status[bundleName].LastSuccessfulDownload != plugin.status[bundleName].LastSuccessfulRequest || plugin.status[bundleName].LastSuccessfulDownload == plugin.status[bundleName].LastRequest {
+	if !plugin.status[bundleName].LastSuccessfulDownload.Equal(plugin.status[bundleName].LastSuccessfulRequest) ||
+		plugin.status[bundleName].LastSuccessfulDownload.Equal(plugin.status[bundleName].LastRequest) {
 		t.Fatal("expected last successful request to be same as download but different from request")
 	}
 }
